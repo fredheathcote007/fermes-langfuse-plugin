@@ -111,9 +111,29 @@ jobs:
           skips = int(suite.get('skipped', '-1'))
           failures = int(suite.get('failures', '-1'))
           errors = int(suite.get('errors', '-1'))
-          assert (tests, skips, failures, errors) == (191, 0, 0, 0), (tests, skips, failures, errors)
-          print('OBS002_FULL_TEST_ORACLE=PASS: 191 collected, 0 skipped, 0 failures, 0 errors')
+          assert (tests, skips, failures, errors) == (202, 0, 0, 0), (tests, skips, failures, errors)
+          print('OBS002_FULL_TEST_ORACLE=PASS: 202 collected, 0 skipped, 0 failures, 0 errors')
           PYTEST_ORACLE
+      - name: v0.23 auto-update source-only control suite
+        id: updater
+        if: matrix.core_label == 'upstream-hermes-0230'
+        shell: bash
+        env:
+          HERMES_HOME: ${{ runner.temp }}/isolated-update-gate-home
+          PYTHONPATH: ${{ github.workspace }}/hermes-agent
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python -m pytest -p no:cacheprovider -q -rs --junitxml="$RUNNER_TEMP/obs002-update-gate-results.xml" fermes-langfuse-plugin/qa/tests/test_obs002_v023_auto_apply_boundary.py
+          python - <<'PYUPDATE_ORACLE'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          root = ET.parse(Path(os.environ['RUNNER_TEMP']) / 'obs002-update-gate-results.xml').getroot()
+          suites = [root] if root.tag == 'testsuite' else root.findall('.//testsuite')
+          assert len(suites) == 1
+          assert tuple(int(suites[0].get(k,'-1')) for k in ('tests','skipped','failures','errors')) == (10,0,0,0)
+          print('H23_UPDATE_SOURCE_ORACLE=PASS: 10 tests, no install or update')
+          PYUPDATE_ORACLE
       - name: Record source-only compatibility receipt
         if: always()
         shell: bash
@@ -125,12 +145,15 @@ jobs:
           INSTALL_OUTCOME: ${{ steps.install.outcome }}
           ADMISSION_OUTCOME: ${{ steps.validate.outcome }}
           TEST_OUTCOME: ${{ steps.tests.outcome }}
+          UPDATE_OUTCOME: ${{ steps.updater.outcome }}
+          CORE_LABEL: ${{ matrix.core_label }}
         run: |
           python - <<'PY'
           import hashlib
           import importlib.metadata
           import json
           import os
+          import re
           from pathlib import Path
           import subprocess
           import sys
@@ -151,6 +174,7 @@ jobs:
                   return 'NOT_INSTALLED'
 
           test_counts = {'tests': None, 'skipped': None, 'failures': None, 'errors': None}
+          updater_counts = {'tests': None, 'skipped': None, 'failures': None, 'errors': None}
           xml = Path(os.environ['RUNNER_TEMP']) / 'obs002-test-results.xml'
           if xml.is_file():
               try:
@@ -160,11 +184,26 @@ jobs:
                       test_counts = {name: int(suites[0].get(name, '-1')) for name in test_counts}
               except (OSError, ET.ParseError, ValueError):
                   pass
+          update_xml = Path(os.environ['RUNNER_TEMP']) / 'obs002-update-gate-results.xml'
+          if update_xml.is_file():
+              try:
+                  updater_tree = ET.parse(update_xml).getroot()
+                  updater_suites = [updater_tree] if updater_tree.tag == 'testsuite' else updater_tree.findall('.//testsuite')
+                  if len(updater_suites) == 1:
+                      updater_counts = {name: int(updater_suites[0].get(name, '-1')) for name in updater_counts}
+              except (OSError, ET.ParseError, ValueError):
+                  pass
           checks = {key: os.environ.get(key + '_OUTCOME', 'missing') for key in
                     ('PIN', 'INSTALL', 'ADMISSION', 'TEST')}
-          status = ('FAIL' if 'failure' in checks.values() else
-                    'BLOCKED' if any(x in checks.values() for x in ('skipped', 'cancelled', 'missing')) else
-                    'PASS' if all(x == 'success' for x in checks.values()) else 'INCONCLUSIVE')
+          updater_outcome = os.environ.get('UPDATE_OUTCOME', 'missing')
+          if os.environ.get('CORE_LABEL') == 'upstream-hermes-0230':
+              checks['UPDATE'] = updater_outcome
+          else:
+              checks['UPDATE'] = 'not-applicable (v0.23-only)'
+          effective_checks = {key:value for key,value in checks.items() if not value.startswith('not-applicable')}
+          status = ('FAIL' if 'failure' in effective_checks.values() else
+                    'BLOCKED' if any(x in effective_checks.values() for x in ('skipped', 'cancelled', 'missing')) else
+                    'PASS' if all(x == 'success' for x in effective_checks.values()) else 'INCONCLUSIVE')
           receipt = {
               'scope': 'source-only', 'status': status,
               'core_repository': os.environ['CORE_REPOSITORY'],
@@ -178,26 +217,44 @@ jobs:
               'python_version': sys.version.split()[0],
               'step_outcomes': checks,
               'test_counts': test_counts,
-              'test_selection': 'langfuse/tests/ including synthetic in-process SDK exporter',
+              'updater_test_counts': updater_counts,
+              'source_gates_proven': ['D02 synthetic per-profile SDK client construction and cache isolation'] +
+                  (['H23-05 typed boolean default-off and held-ref/consent source gate (quoted-false bug OPEN)'] if os.environ.get('CORE_LABEL') == 'upstream-hermes-0230' else []),
+              'test_selection': 'langfuse/tests/ 202 cases plus v0.23-only qa/tests 10 cases (source-only mocks and exporter)',
               'operational_gates_not_proven': [
                   'H23-02 live shared-gateway profile routing',
                   'H23-03 live session and hook lifecycle reconciliation',
                   'H23-04 cross-profile delegation runtime',
-                  'H23-05 auto-update off and pin-drift adversarial execution',
+                  'H23-05 quoted-false config consent defect (fermes hermes-agent issue 65)',
+                  'H23-05 real installer update/pin-drift behaviour (beyond synthetic callbacks)',
                   'H23-06 disposable installer version-floor and rollback',
                   'D01 purge of queued pre-revocation identity',
                   'D02 per-profile project and credential routing',
                   'D04 seven-day retention and configuration-only recovery',
               ],
           }
-          if test_counts != {'tests':191,'skipped':0,'failures':0,'errors':0} and receipt['status'] == 'PASS':
+          if test_counts != {'tests':202,'skipped':0,'failures':0,'errors':0} and receipt['status'] == 'PASS':
+              receipt['status'] = 'FAIL'
+          if os.environ.get('CORE_LABEL') == 'upstream-hermes-0230' and updater_counts != {'tests':10,'skipped':0,'failures':0,'errors':0}:
+              receipt['status'] = 'FAIL'
+          if os.environ.get('CORE_LABEL') != 'upstream-hermes-0230' and updater_outcome != 'skipped':
               receipt['status'] = 'FAIL'
           if receipt['core_actual_sha'] != receipt['core_expected_sha']:
               receipt['status'] = 'FAIL'
           if receipt['sdk_actual_version'] != receipt['sdk_expected_version'] and receipt['status'] == 'PASS':
               receipt['status'] = 'FAIL'
           path = Path(os.environ['RUNNER_TEMP']) / 'obs002-compat-receipt.json'
-          path.write_text(json.dumps(receipt, indent=2) + '\n')
+          serialized = json.dumps(receipt, indent=2)
+          for forbidden in ('pk-lf-', 'sk-lf-', 'SYNTHETIC_USER', 'profile-a.invalid', 'profile-b.invalid'):
+              if forbidden in serialized:
+                  raise SystemExit('sensitive test material present in source-only receipt')
+          for junit_name in ('obs002-test-results.xml', 'obs002-update-gate-results.xml'):
+              junit = Path(os.environ['RUNNER_TEMP']) / junit_name
+              if junit.is_file():
+                  text = junit.read_text(errors='replace')
+                  if re.search(r'(?:pk-lf-|sk-lf-)[a-f0-9]{20,}|SYNTHETIC_USER_NEVER_REAL|https://[a-z0-9.-]+\.invalid', text):
+                      raise SystemExit('synthetic test identity appeared in JUnit artifact')
+          path.write_text(serialized + '\n')
           print(json.dumps(receipt, indent=2))
           if receipt['status'] != 'PASS':
               raise SystemExit('source compatibility receipt status: ' + receipt['status'])
@@ -210,4 +267,5 @@ jobs:
           path: |
             ${{ runner.temp }}/obs002-compat-receipt.json
             ${{ runner.temp }}/obs002-test-results.xml
+            ${{ runner.temp }}/obs002-update-gate-results.xml
           retention-days: 7
