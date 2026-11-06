@@ -65,6 +65,6 @@ jobs:
         working-directory: fermes-langfuse-plugin/langfuse
         env:
           HERMES_AGENT_REPO: ${{ github.workspace }}/hermes-agent
-          PYTHONPATH: ${{ github.workspace }}/hermes-agent
+          PYTHONPATH: ${{ github.workspace }}/hermes-agent:${{ github.workspace }}/fermes-langfuse-plugin/langfuse/tests
           PYTHONDONTWRITEBYTECODE: '1'
         run: python -m pytest -p no:cacheprovider -q
