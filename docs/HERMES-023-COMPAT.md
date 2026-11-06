@@ -27,8 +27,18 @@ Date: 2026-11-06. Scope: **source-only compatibility, no installation or merge**
 
 ## Acceptance boundary
 
-Four source CI combinations: earlier Fermes core and Hermes v0.23.0, each with Langfuse SDK 4.15.2 and 4.18.0 on Python 3.14. This matrix uses immutable source refs, a plugin admission check, the complete `langfuse/tests/` suite with exactly 191 collected and zero skipped, and a synthetic SDK-backed no-network egress probe. Each cell uploads a seven-day source-only receipt. Any failed/skipped/blocked required test is not a pass.
+Four source CI combinations: earlier Fermes core and Hermes v0.23.0, each with Langfuse SDK 4.15.2 and 4.18.0 on Python 3.14. This matrix uses immutable source refs, a plugin admission check, the complete `langfuse/tests/` suite with exactly 202 collected and zero skipped, and a synthetic SDK-backed no-network egress probe. Each cell uploads a seven-day source-only receipt. Any failed/skipped/blocked required test is not a pass.
 
 **Explicitly outside this source-only qualification:** gateway deployment, profile credential or project changes (D02), plugin update/installer actions on running systems, SDK queue purge after consent revocation (D01), seven-day storage retention/configuration recovery (D04), production, source or catalogue merge. No source-level PASS proves those operational requirements.
 
 Review evidence and the full P01-P10/M11-M18/T01-T12 inventory are tracked in [OBS-002 issue #2](https://github.com/fredheathcote007/fermes-observability/issues/2). A separate source PR, independent review, GitHub CI and later owner approvals remain mandatory.
+
+## Added D-02 synthetic project-client source assurance
+
+Eleven new source-only tests exercise the real plugin client-construction path and Hermes profile secret scopes, with a **non-network SDK constructor spy**. They prove distinct per-home public/secret key and base URL selection, scoped-only legacy key fallback, absence of ambient-secret borrowing, placeholder rejection, custom compatible endpoint prefixes, and the documented immutable-client-cache rotation boundary. Existing 64-round overlapping profile ID tests and context-free finalizer tests remain part of the plugin suite. The source CI suite is now **202 plugin tests** on each core/SDK combination; an additional **10 v0.23 updater source-gate tests** run only in the two v0.23 cells, using injected callbacks and temporary receipt/marker state, with no plugin installation or network access.
+
+The D-02 **actual external Langfuse project routing** has not been tested and is not accepted. Likewise the updater callback tests cannot prove the real installer/rollback or that an operator configuration has auto-update disabled. These remain blocked operational gates.
+
+### Confirmed v0.23 updater consent defect (NOT ACCEPTED)
+
+The source-level updater checks above exercise correctly typed boolean options only. The released v0.23 core and existing Fermes fork use `bool(config_get("plugins", "auto_apply"))`; the actual YAML configuration reader preserves quoted `"false"`/`"no"` as nonempty strings, incorrectly enabling unattended updates. This was reproduced with a disposable scratch config, without running an update, and is tracked as [Fermes Hermes issue #65](https://github.com/fredheathcote007/hermes-agent/issues/65). **H23-05 must not be considered fully satisfied** until a reviewed source correction restricts consent to literal boolean `true` and qualified tests pass. No live configuration or plugin was changed.
