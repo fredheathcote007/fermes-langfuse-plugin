@@ -1,0 +1,66 @@
+name: source-ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  langfuse-source:
+    name: SDK ${{ matrix.langfuse_sdk }} / Python 3.14 / Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        langfuse_sdk: ['4.15.2', '4.18.0']
+    steps:
+      - name: Checkout Fermes plugin source
+        uses: actions/checkout@v4
+        with:
+          path: fermes-langfuse-plugin
+      # The pinned Fermes Hermes fork is publicly readable (verified 6 Nov 2026).
+      # This step requires no additional read token; revalidate if repo visibility changes.
+      - name: Checkout pinned Fermes Hermes compatibility core
+        uses: actions/checkout@v4
+        with:
+          repository: fredheathcote007/hermes-agent
+          ref: ab41b03062b99b9b19a310c203c5bf48d7820fee
+          path: hermes-agent
+      - name: Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install using upstream Hermes dependency overrides
+        shell: bash
+        run: |
+          python -m pip install uv
+          python -c 'import sys,tomllib; print("\n".join(tomllib.load(open(sys.argv[1], "rb")).get("tool", {}).get("uv", {}).get("override-dependencies", [])))' hermes-agent/pyproject.toml > "$RUNNER_TEMP/core-overrides.txt"
+          pyexe=$(python -c 'import sys; print(sys.executable)')
+          python -m uv pip install --python "$pyexe" --override "$RUNNER_TEMP/core-overrides.txt" -e ./hermes-agent pytest pytest-asyncio
+          python -m uv pip install --python "$pyexe" --override "$RUNNER_TEMP/core-overrides.txt" "langfuse==${{ matrix.langfuse_sdk }}"
+      - name: Verify source package and plugin manifest
+        shell: bash
+        env:
+          HERMES_HOME: ${{ runner.temp }}/isolated-hermes-home
+          PYTHONPATH: ${{ github.workspace }}/hermes-agent
+        run: |
+          python -m hermes_cli.main plugins validate fermes-langfuse-plugin/langfuse
+          python - <<'PY'
+          from pathlib import Path
+          root = Path('fermes-langfuse-plugin')
+          forbidden = [str(p) for p in root.rglob('*') if p.is_file() and (p.suffix in {'.pyc','.db','.pem','.key'} or p.name.startswith('.env') or '__pycache__' in p.parts)]
+          assert not forbidden, forbidden
+          print('SOURCE_ARTIFACTS=PASS')
+          PY
+      - name: Full Langfuse plugin test suite
+        shell: bash
+        working-directory: fermes-langfuse-plugin/langfuse
+        env:
+          HERMES_AGENT_REPO: ${{ github.workspace }}/hermes-agent
+          PYTHONPATH: ${{ github.workspace }}/hermes-agent
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -m pytest -p no:cacheprovider -q
