@@ -10,42 +10,70 @@ permissions:
 
 jobs:
   langfuse-source:
-    name: SDK ${{ matrix.langfuse_sdk }} / Python 3.14 / Linux
+    name: ${{ matrix.core_label }} / SDK ${{ matrix.langfuse_sdk }} / Python 3.14
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        langfuse_sdk: ['4.15.2', '4.18.0']
+        include:
+          - core_label: fermes-pinned
+            core_repository: fredheathcote007/hermes-agent
+            core_ref: ab41b03062b99b9b19a310c203c5bf48d7820fee
+            langfuse_sdk: '4.15.2'
+          - core_label: fermes-pinned
+            core_repository: fredheathcote007/hermes-agent
+            core_ref: ab41b03062b99b9b19a310c203c5bf48d7820fee
+            langfuse_sdk: '4.18.0'
+          - core_label: upstream-hermes-0230
+            core_repository: NousResearch/hermes-agent
+            core_ref: 2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19
+            langfuse_sdk: '4.15.2'
+          - core_label: upstream-hermes-0230
+            core_repository: NousResearch/hermes-agent
+            core_ref: 2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19
+            langfuse_sdk: '4.18.0'
     steps:
       - name: Checkout Fermes plugin source
         uses: actions/checkout@v4
         with:
           path: fermes-langfuse-plugin
-      # The pinned Fermes Hermes fork is publicly readable (verified 6 Nov 2026).
-      # This step requires no additional read token; revalidate if repo visibility changes.
-      - name: Checkout pinned Fermes Hermes compatibility core
+      - name: Checkout immutable Hermes compatibility core
         uses: actions/checkout@v4
         with:
-          repository: fredheathcote007/hermes-agent
-          ref: ab41b03062b99b9b19a310c203c5bf48d7820fee
+          repository: ${{ matrix.core_repository }}
+          ref: ${{ matrix.core_ref }}
           path: hermes-agent
+      - name: Verify exact core SHA and source provenance
+        id: pin
+        shell: bash
+        env:
+          EXPECTED_CORE_SHA: ${{ matrix.core_ref }}
+        run: |
+          actual="$(git -C hermes-agent rev-parse HEAD)"
+          test "$actual" = "$EXPECTED_CORE_SHA"
+          test -z "$(git -C hermes-agent status --porcelain)"
+          test -z "$(git -C fermes-langfuse-plugin status --porcelain)"
+          sha256sum hermes-agent/pyproject.toml fermes-langfuse-plugin/langfuse/plugin.yaml
+          echo "PIN_VERIFIED=$actual"
       - name: Python 3.14
         uses: actions/setup-python@v5
         with:
           python-version: '3.14'
-      - name: Install using upstream Hermes dependency overrides
+      - name: Install under the selected Hermes dependency constraints
+        id: install
         shell: bash
         run: |
           python -m pip install uv
           python -c 'import sys,tomllib; print("\n".join(tomllib.load(open(sys.argv[1], "rb")).get("tool", {}).get("uv", {}).get("override-dependencies", [])))' hermes-agent/pyproject.toml > "$RUNNER_TEMP/core-overrides.txt"
-          pyexe=$(python -c 'import sys; print(sys.executable)')
+          pyexe="$(python -c 'import sys; print(sys.executable)')"
           python -m uv pip install --python "$pyexe" --override "$RUNNER_TEMP/core-overrides.txt" -e ./hermes-agent pytest pytest-asyncio
           python -m uv pip install --python "$pyexe" --override "$RUNNER_TEMP/core-overrides.txt" "langfuse==${{ matrix.langfuse_sdk }}"
       - name: Verify source package and plugin manifest
+        id: validate
         shell: bash
         env:
-          HERMES_HOME: ${{ runner.temp }}/isolated-hermes-home
+          HERMES_HOME: ${{ runner.temp }}/isolated-admission-home
           PYTHONPATH: ${{ github.workspace }}/hermes-agent
         run: |
           python -m hermes_cli.main plugins validate fermes-langfuse-plugin/langfuse
@@ -60,11 +88,126 @@ jobs:
           assert not forbidden, forbidden
           print('SOURCE_ARTIFACTS=PASS')
           PY
-      - name: Full Langfuse plugin test suite
+      - name: Full Langfuse plugin test suite and synthetic egress check
+        id: tests
         shell: bash
         working-directory: fermes-langfuse-plugin/langfuse
         env:
           HERMES_AGENT_REPO: ${{ github.workspace }}/hermes-agent
+          HERMES_HOME: ${{ runner.temp }}/isolated-test-home
           PYTHONPATH: ${{ github.workspace }}/hermes-agent:${{ github.workspace }}/fermes-langfuse-plugin/langfuse/tests
           PYTHONDONTWRITEBYTECODE: '1'
-        run: python -m pytest -p no:cacheprovider -q
+        run: |
+          python -m pytest -p no:cacheprovider -q -rs --junitxml="$RUNNER_TEMP/obs002-test-results.xml"
+          python - <<'PYTEST_ORACLE'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          root = ET.parse(Path(os.environ['RUNNER_TEMP']) / 'obs002-test-results.xml').getroot()
+          suites = [root] if root.tag == 'testsuite' else root.findall('.//testsuite')
+          assert len(suites) == 1, f'Unexpected JUnit suite count: {len(suites)}'
+          suite = suites[0]
+          tests = int(suite.get('tests', '-1'))
+          skips = int(suite.get('skipped', '-1'))
+          failures = int(suite.get('failures', '-1'))
+          errors = int(suite.get('errors', '-1'))
+          assert (tests, skips, failures, errors) == (191, 0, 0, 0), (tests, skips, failures, errors)
+          print('OBS002_FULL_TEST_ORACLE=PASS: 191 collected, 0 skipped, 0 failures, 0 errors')
+          PYTEST_ORACLE
+      - name: Record source-only compatibility receipt
+        if: always()
+        shell: bash
+        env:
+          CORE_REPOSITORY: ${{ matrix.core_repository }}
+          CORE_EXPECTED_SHA: ${{ matrix.core_ref }}
+          SDK_EXPECTED_VERSION: ${{ matrix.langfuse_sdk }}
+          PIN_OUTCOME: ${{ steps.pin.outcome }}
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          ADMISSION_OUTCOME: ${{ steps.validate.outcome }}
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+        run: |
+          python - <<'PY'
+          import hashlib
+          import importlib.metadata
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import xml.etree.ElementTree as ET
+
+          def sha256(path):
+              p = Path(path)
+              return hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else 'NOT_AVAILABLE'
+          def rev(path):
+              try:
+                  return subprocess.check_output(['git', '-C', path, 'rev-parse', 'HEAD'], text=True).strip()
+              except (OSError, subprocess.CalledProcessError):
+                  return 'NOT_AVAILABLE'
+          def version(name):
+              try:
+                  return importlib.metadata.version(name)
+              except importlib.metadata.PackageNotFoundError:
+                  return 'NOT_INSTALLED'
+
+          test_counts = {'tests': None, 'skipped': None, 'failures': None, 'errors': None}
+          xml = Path(os.environ['RUNNER_TEMP']) / 'obs002-test-results.xml'
+          if xml.is_file():
+              try:
+                  tree = ET.parse(xml).getroot()
+                  suites = [tree] if tree.tag == 'testsuite' else tree.findall('.//testsuite')
+                  if len(suites) == 1:
+                      test_counts = {name: int(suites[0].get(name, '-1')) for name in test_counts}
+              except (OSError, ET.ParseError, ValueError):
+                  pass
+          checks = {key: os.environ.get(key + '_OUTCOME', 'missing') for key in
+                    ('PIN', 'INSTALL', 'ADMISSION', 'TEST')}
+          status = ('FAIL' if 'failure' in checks.values() else
+                    'BLOCKED' if any(x in checks.values() for x in ('skipped', 'cancelled', 'missing')) else
+                    'PASS' if all(x == 'success' for x in checks.values()) else 'INCONCLUSIVE')
+          receipt = {
+              'scope': 'source-only', 'status': status,
+              'core_repository': os.environ['CORE_REPOSITORY'],
+              'core_expected_sha': os.environ['CORE_EXPECTED_SHA'],
+              'core_actual_sha': rev('hermes-agent'),
+              'core_pyproject_sha256': sha256('hermes-agent/pyproject.toml'),
+              'plugin_source_sha': rev('fermes-langfuse-plugin'),
+              'plugin_manifest_sha256': sha256('fermes-langfuse-plugin/langfuse/plugin.yaml'),
+              'sdk_expected_version': os.environ['SDK_EXPECTED_VERSION'],
+              'sdk_actual_version': version('langfuse'),
+              'python_version': sys.version.split()[0],
+              'step_outcomes': checks,
+              'test_counts': test_counts,
+              'test_selection': 'langfuse/tests/ including synthetic in-process SDK exporter',
+              'operational_gates_not_proven': [
+                  'H23-02 live shared-gateway profile routing',
+                  'H23-03 live session and hook lifecycle reconciliation',
+                  'H23-04 cross-profile delegation runtime',
+                  'H23-05 auto-update off and pin-drift adversarial execution',
+                  'H23-06 disposable installer version-floor and rollback',
+                  'D01 purge of queued pre-revocation identity',
+                  'D02 per-profile project and credential routing',
+                  'D04 seven-day retention and configuration-only recovery',
+              ],
+          }
+          if test_counts != {'tests':191,'skipped':0,'failures':0,'errors':0} and receipt['status'] == 'PASS':
+              receipt['status'] = 'FAIL'
+          if receipt['core_actual_sha'] != receipt['core_expected_sha']:
+              receipt['status'] = 'FAIL'
+          if receipt['sdk_actual_version'] != receipt['sdk_expected_version'] and receipt['status'] == 'PASS':
+              receipt['status'] = 'FAIL'
+          path = Path(os.environ['RUNNER_TEMP']) / 'obs002-compat-receipt.json'
+          path.write_text(json.dumps(receipt, indent=2) + '\n')
+          print(json.dumps(receipt, indent=2))
+          if receipt['status'] != 'PASS':
+              raise SystemExit('source compatibility receipt status: ' + receipt['status'])
+          PY
+      - name: Preserve compatibility receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs002-${{ matrix.core_label }}-${{ matrix.langfuse_sdk }}
+          path: |
+            ${{ runner.temp }}/obs002-compat-receipt.json
+            ${{ runner.temp }}/obs002-test-results.xml
+          retention-days: 7

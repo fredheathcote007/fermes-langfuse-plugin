@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import socket
 from langfuse import Langfuse
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
@@ -32,6 +33,24 @@ class Config:
     def current_cron_execution(self): return None
 mod._PLUGIN_CTX=Config()
 assert mod._sdk_identity_queue_discard_verified() is False
+# The in-process exporter must not hide secondary SDK/telemetry network activity.
+network_attempts = []
+def deny_network(*args, **kwargs):
+    network_attempts.append('attempt')
+    raise AssertionError('unexpected DNS or network operation from SDK-backed probe')
+class DeniedSocket(socket.socket):
+    def connect(self, *args, **kwargs): return deny_network(*args, **kwargs)
+    def connect_ex(self, *args, **kwargs): return deny_network(*args, **kwargs)
+    def send(self, *args, **kwargs): return deny_network(*args, **kwargs)
+    def sendall(self, *args, **kwargs): return deny_network(*args, **kwargs)
+    def sendto(self, *args, **kwargs): return deny_network(*args, **kwargs)
+    def sendmsg(self, *args, **kwargs): return deny_network(*args, **kwargs)
+socket.socket = DeniedSocket
+socket.create_connection = deny_network
+socket.getaddrinfo = deny_network
+socket.gethostbyname = deny_network
+socket.gethostbyname_ex = deny_network
+socket.getnameinfo = deny_network
 capture=Capture()
 sdk=Langfuse(public_key='pk-lf-synthetic-obs002',secret_key='sk-lf-synthetic-obs002',base_url='http://127.0.0.1:9',span_exporter=capture,tracer_provider=TracerProvider(),flush_at=256,flush_interval=60)
 mod._get_langfuse=lambda: sdk
@@ -42,10 +61,11 @@ try:
     assert 'user_id' not in mod._TRACE_STATE[state_key].propagated
     mod._finish_trace(state_key)
     sdk.flush()
-    recorded=[(span.name,dict(span.attributes or {})) for span in capture.spans]
-    assert recorded, 'No span export, so the test is inconclusive'
-    assert 'SYNTHETIC_USER_NEVER_REAL' not in repr(recorded)
-    assert 'user.id' not in repr(recorded).lower()
-    print(json.dumps({'status':'PASS','exported_spans':len(recorded),'optional_identity_absent':True,'network':'in-process exporter only'}))
 finally:
     sdk.shutdown()
+recorded=[(span.name,dict(span.attributes or {})) for span in capture.spans]
+assert recorded, 'No span export, so the test is inconclusive'
+assert 'SYNTHETIC_USER_NEVER_REAL' not in repr(recorded)
+assert 'user.id' not in repr(recorded).lower()
+assert network_attempts == [], 'SDK or plugin attempted a Python-level network operation'
+print(json.dumps({'status':'PASS','exported_spans':len(recorded),'optional_identity_absent':True,'network':'no Python-level socket DNS/connect/send attempted','network_attempts':len(network_attempts)}))
