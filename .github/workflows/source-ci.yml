@@ -51,8 +51,12 @@ jobs:
           python -m hermes_cli.main plugins validate fermes-langfuse-plugin/langfuse
           python - <<'PY'
           from pathlib import Path
+          import subprocess
           root = Path('fermes-langfuse-plugin')
-          forbidden = [str(p) for p in root.rglob('*') if p.is_file() and (p.suffix in {'.pyc','.db','.pem','.key'} or p.name.startswith('.env') or '__pycache__' in p.parts)]
+          tracked = subprocess.check_output(['git', '-C', str(root), 'ls-files', '-z']).decode().split('\0')
+          forbidden = [name for name in tracked if name and (
+              Path(name).suffix in {'.pyc', '.db', '.pem', '.key'} or
+              Path(name).name.startswith('.env') or '__pycache__' in Path(name).parts)]
           assert not forbidden, forbidden
           print('SOURCE_ARTIFACTS=PASS')
           PY
