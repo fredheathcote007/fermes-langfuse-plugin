@@ -294,3 +294,33 @@ def test_distinct_profile_homes_reject_same_secret_with_different_public_key(bou
     with _serve(homes[1], mismatched):
         _require(mod._get_langfuse() is None, 'reused secret bypassed project ownership guard')
     _require(len(created) == 1, 'second SDK exporter constructed for shared secret')
+
+
+def test_real_gateway_profile_runtime_scope_rejects_cross_profile_project_secrets(boundary):
+    """D02/T08: bind the real gateway scope, not a synthetic substitute."""
+    from gateway.run import _profile_runtime_scope
+    from hermes_constants import get_hermes_home_override
+
+    mod, homes, created = boundary
+    a = _values('gateway-a')
+    b = _values('gateway-b')
+    with _profile_runtime_scope(homes[0], a):
+        client_a = mod._get_langfuse()
+        _require(client_a is not None, 'gateway A failed to build its scoped client')
+        _require(client_a is mod._get_langfuse(), 'gateway A did not retain its client')
+    _require(get_hermes_home_override() is None, 'gateway A leaked home override')
+    _require(secret_scope.current_secret_scope() is None, 'gateway A leaked credential scope')
+
+    with _profile_runtime_scope(homes[1], b):
+        client_b = mod._get_langfuse()
+        _require(client_b is not None and client_b is not client_a, 'gateway B reused A SDK client')
+    _require(get_hermes_home_override() is None, 'gateway B leaked home override')
+    _require(secret_scope.current_secret_scope() is None, 'gateway B leaked credential scope')
+
+    cross = dict(b)
+    cross['HERMES_LANGFUSE_SECRET_KEY'] = a['HERMES_LANGFUSE_SECRET_KEY']
+    with _profile_runtime_scope(homes[2], cross):
+        _require(mod._get_langfuse() is None, 'gateway C accepted A secret with B public key')
+    _require(len(created) == 2, 'negative gateway scope constructed an SDK client')
+    _require(get_hermes_home_override() is None, 'gateway C leaked home override')
+    _require(secret_scope.current_secret_scope() is None, 'gateway C leaked credential scope')
