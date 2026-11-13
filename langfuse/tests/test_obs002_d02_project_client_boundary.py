@@ -269,6 +269,7 @@ def test_concurrent_cold_homes_cannot_both_claim_shared_project_key(boundary):
         for round_number in range(32):
             mod._LANGFUSE_CLIENT_BY_HOME.clear()
             mod._LANGFUSE_PROJECT_OWNER_BY_KEY.clear()
+            mod._LANGFUSE_SECRET_OWNER_BY_KEY.clear()
             barrier = Barrier(2)
 
             def start(home):
@@ -280,3 +281,16 @@ def test_concurrent_cold_homes_cannot_both_claim_shared_project_key(boundary):
             a, b = left.result(timeout=8), right.result(timeout=8)
             _require((a is None) != (b is None), 'two profiles both accepted or both rejected shared project')
             _require(len(created) == round_number + 1, 'duplicate exporter constructed during project-key race')
+
+
+def test_distinct_profile_homes_reject_same_secret_with_different_public_key(boundary):
+    """D02/T08: Langfuse API routing by secret cannot bypass profile ownership."""
+    mod, homes, created = boundary
+    original = _values('original-secret-owner')
+    mismatched = _values('other-public-same-secret')
+    mismatched['HERMES_LANGFUSE_SECRET_KEY'] = original['HERMES_LANGFUSE_SECRET_KEY']
+    with _serve(homes[0], original):
+        _require(mod._get_langfuse() is not None, 'original profile client missing')
+    with _serve(homes[1], mismatched):
+        _require(mod._get_langfuse() is None, 'reused secret bypassed project ownership guard')
+    _require(len(created) == 1, 'second SDK exporter constructed for shared secret')

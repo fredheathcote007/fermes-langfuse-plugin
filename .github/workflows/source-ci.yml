@@ -111,8 +111,8 @@ jobs:
           skips = int(suite.get('skipped', '-1'))
           failures = int(suite.get('failures', '-1'))
           errors = int(suite.get('errors', '-1'))
-          assert (tests, skips, failures, errors) == (205, 0, 0, 0), (tests, skips, failures, errors)
-          print('OBS002_FULL_TEST_ORACLE=PASS: 205 collected, 0 skipped, 0 failures, 0 errors')
+          assert (tests, skips, failures, errors) == (206, 0, 0, 0), (tests, skips, failures, errors)
+          print('OBS002_FULL_TEST_ORACLE=PASS: 206 collected, 0 skipped, 0 failures, 0 errors')
           PYTEST_ORACLE
       - name: v0.23 auto-update source-only control suite
         id: updater
@@ -220,7 +220,7 @@ jobs:
               'updater_test_counts': updater_counts,
               'source_gates_proven': ['D02 synthetic per-profile SDK client construction and cache isolation'] +
                   (['H23-05 typed boolean default-off and held-ref/consent source gate (quoted-false bug OPEN)'] if os.environ.get('CORE_LABEL') == 'upstream-hermes-0230' else []),
-              'test_selection': 'langfuse/tests/ 205 cases plus v0.23-only qa/tests 10 cases (source-only mocks and exporter)',
+              'test_selection': 'langfuse/tests/ 206 cases plus v0.23-only qa/tests 10 cases (source-only mocks and exporter)',
               'operational_gates_not_proven': [
                   'H23-02 live shared-gateway profile routing',
                   'H23-03 live session and hook lifecycle reconciliation',
@@ -233,7 +233,7 @@ jobs:
                   'D04 seven-day retention and configuration-only recovery',
               ],
           }
-          if test_counts != {'tests':205,'skipped':0,'failures':0,'errors':0} and receipt['status'] == 'PASS':
+          if test_counts != {'tests':206,'skipped':0,'failures':0,'errors':0} and receipt['status'] == 'PASS':
               receipt['status'] = 'FAIL'
           if os.environ.get('CORE_LABEL') == 'upstream-hermes-0230' and updater_counts != {'tests':10,'skipped':0,'failures':0,'errors':0}:
               receipt['status'] = 'FAIL'

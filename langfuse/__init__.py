@@ -78,10 +78,11 @@ _LANGFUSE_CLIENT = None
 # keys live in each profile's .env, so a single slot would trace profile B into profile A's project
 # (or pin B to A's failed init). The slot above stays for the unscoped single-profile path.
 _LANGFUSE_CLIENT_BY_HOME: dict[str, Any] = {}
-# D02/T08: profile-specific clients are not enough if two homes reuse one project
-# key. Hash the public project key so no credential value is retained in this map.
+# D02/T08: profile clients may still route to one project when a public key OR
+# secret key is reused across homes. Store only in-memory SHA-256 fingerprints.
 # _settle_client() holds _LANGFUSE_CLIENT_LOCK across construction/registration.
 _LANGFUSE_PROJECT_OWNER_BY_KEY: dict[bytes, str] = {}
+_LANGFUSE_SECRET_OWNER_BY_KEY: dict[bytes, str] = {}
 # Separate from _STATE_LOCK (hot path) so the two never nest; serializes the
 # first client build so racing callers can't each construct a client.
 _LANGFUSE_CLIENT_LOCK = threading.Lock()
@@ -420,9 +421,12 @@ def _build_client() -> Optional[Langfuse]:
     home = hermes_home_key()
     project_key_hash = hashlib.sha256(public_key.encode("utf-8")).digest()
     existing_owner = _LANGFUSE_PROJECT_OWNER_BY_KEY.get(project_key_hash)
-    if existing_owner is not None and existing_owner != home:
+    secret_key_hash = hashlib.sha256(secret_key.encode("utf-8")).digest()
+    existing_secret_owner = _LANGFUSE_SECRET_OWNER_BY_KEY.get(secret_key_hash)
+    if ((existing_owner is not None and existing_owner != home) or
+            (existing_secret_owner is not None and existing_secret_owner != home)):
         logger.warning(
-            "Langfuse plugin: the same project public key belongs to another "
+            "Langfuse plugin: a project credential is already owned by another "
             "Hermes profile; tracing is disabled for this profile. Use a distinct "
             "Langfuse project/credential pair and restart."
         )
@@ -452,6 +456,7 @@ def _build_client() -> Optional[Langfuse]:
         client = Langfuse(**kwargs)
         if client is not None:
             _LANGFUSE_PROJECT_OWNER_BY_KEY[project_key_hash] = home
+            _LANGFUSE_SECRET_OWNER_BY_KEY[secret_key_hash] = home
         return client
     except Exception as exc:  # pragma: no cover - fail-open
         logger.warning("Could not initialize Langfuse client: %s", exc)

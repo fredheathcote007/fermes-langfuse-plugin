@@ -8,18 +8,18 @@
 
 Using non-network synthetic credentials and a constructor spy, two distinct profile homes both built SDK clients when configured with the same Langfuse project public key. The new test was RED before the fix and GREEN afterwards.
 
-The candidate records an in-memory SHA-256 digest of the public project key against the resolved profile home after successful client construction. Another home presenting the same key is rejected before SDK construction, with a diagnostic containing no keys or profile identities. The existing first-build lock serialises race conditions.
+The candidate records an in-memory SHA-256 digest of the public project key against the resolved profile home after successful client construction. Another home presenting either matching credential component is rejected before SDK construction, with a diagnostic containing no keys or profile identities. The existing first-build lock serialises race conditions.
 
-Three added source tests cover identical keypairs, the same public key with a different secret, and concurrent cold client builds with an identical project key. This extends the strict source suite from 202 to **205 tests**. The separate v0.23 updater control remains 10 tests.
+Four added source tests cover identical keypairs, the same public key with a different secret, the same secret with a different public key, and concurrent cold client builds with an identical project key. This extends the strict source suite from 202 to **206 tests**. The separate v0.23 updater control remains 10 tests.
 
 ## Boundaries and required evidence
 
 - No real credentials, Langfuse projects, deployed plugins or QA service settings were changed.
-- The registry is in process memory only and does not log the public key, its digest, or an identity.
+- The registries are in process memory only and do not log either key, its digest, or an identity.
 - No hot credential rotation: changes require restart as with the existing immutable client cache.
-- Distinct public API keys can refer to the SAME backend project. This source guard cannot prove project uniqueness across different keys; independent D02 live project-ID/egress qualification is still mandatory.
+- Distinct public and secret API key pairs can refer to the SAME backend project. This source guard cannot prove project uniqueness across different keys; independent D02 live project-ID/egress qualification is still mandatory.
 - Host aliases and endpoint aliases with distinct keys are likewise outside this source guard.
 - D01 identity attribution remains disabled until queued-exporter discard is proven.
 - All four pinned core/SDK CI cells, independent exact-diff review, and operational T01/T08 evidence remain acceptance gates. Do not merge/install on source-only proof.
 
-The original PR #3 202-test receipts remain historical source-only evidence and are not re-labelled as 205-test results.
+The original PR #3 202-test receipts remain historical source-only evidence and are not re-labelled as 206-test results.
