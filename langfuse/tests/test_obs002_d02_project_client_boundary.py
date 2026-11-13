@@ -235,8 +235,8 @@ def test_cold_client_construction_race_is_serialised_for_distinct_profiles(bound
             _require(selected[1]._kwargs['secret_key'] == b_keys['HERMES_LANGFUSE_SECRET_KEY'], 'cold B credential scope lost')
 
 
-def test_distinct_profile_homes_must_reject_same_project_credential_pair(boundary):
-    """D02/T08: two profile homes may not share a project or credential pair."""
+def test_distinct_profile_homes_must_reject_same_project_credential_pair(boundary, caplog):
+    """D02/T08: reject shared credentials without logging keys or profile paths."""
     mod, homes, created = boundary
     shared = _values('shared-project')
     with _serve(homes[0], shared):
@@ -246,6 +246,11 @@ def test_distinct_profile_homes_must_reject_same_project_credential_pair(boundar
         client_b = mod._get_langfuse()
     _require(client_b is None, 'different profile reused an already-owned project credential pair')
     _require(len(created) == 1, 'a second SDK exporter was constructed for a shared project')
+    _require('already owned by another Hermes profile' in caplog.text, 'missing collision diagnostic')
+    for sensitive in (shared['HERMES_LANGFUSE_PUBLIC_KEY'],
+                      shared['HERMES_LANGFUSE_SECRET_KEY'],
+                      str(homes[0]), str(homes[1])):
+        _require(sensitive not in caplog.text, 'collision diagnostic exposed credential or home')
 
 
 def test_distinct_profile_homes_reject_same_project_key_even_after_secret_rotation(boundary):
@@ -261,10 +266,19 @@ def test_distinct_profile_homes_reject_same_project_key_even_after_secret_rotati
     _require(len(created) == 1, 'second SDK client was constructed for duplicate project')
 
 
-def test_concurrent_cold_homes_cannot_both_claim_shared_project_key(boundary):
-    """D02: serialised first-build reservation must reject one racing profile."""
+def test_concurrent_cold_homes_cannot_both_claim_shared_project_key(boundary, monkeypatch):
+    """D02: a widened SDK build race must not construct two exporters."""
     mod, homes, created = boundary
     shared = _values('concurrent-shared')
+    original_construct = mod.Langfuse
+
+    def slow_construct(**kwargs):
+        # Force an overlapping first-build window; without the client lock,
+        # both threads can enter here before either key is registered.
+        time.sleep(0.025)
+        return original_construct(**kwargs)
+
+    monkeypatch.setattr(mod, 'Langfuse', slow_construct)
     with ThreadPoolExecutor(max_workers=2) as pool:
         for round_number in range(32):
             mod._LANGFUSE_CLIENT_BY_HOME.clear()
@@ -324,3 +338,26 @@ def test_real_gateway_profile_runtime_scope_rejects_cross_profile_project_secret
     _require(len(created) == 2, 'negative gateway scope constructed an SDK client')
     _require(get_hermes_home_override() is None, 'gateway C leaked home override')
     _require(secret_scope.current_secret_scope() is None, 'gateway C leaked credential scope')
+
+
+def test_failed_sdk_constructor_does_not_claim_shared_project_credentials(boundary, monkeypatch):
+    """D02/T08: a failed first SDK construction cannot reserve a project forever."""
+    mod, homes, created = boundary
+    shared = _values('constructor-fail')
+    original_construct = mod.Langfuse
+    first = [True]
+
+    def fail_first_build(**kwargs):
+        if first[0]:
+            first[0] = False
+            raise RuntimeError('synthetic SDK constructor failure')
+        return original_construct(**kwargs)
+
+    monkeypatch.setattr(mod, 'Langfuse', fail_first_build)
+    with _serve(homes[0], shared):
+        _require(mod._get_langfuse() is None, 'failed constructor leaked an SDK client')
+    _require(not mod._LANGFUSE_PROJECT_OWNER_BY_KEY, 'failed constructor claimed public key')
+    _require(not mod._LANGFUSE_SECRET_OWNER_BY_KEY, 'failed constructor claimed secret key')
+    with _serve(homes[1], shared):
+        _require(mod._get_langfuse() is not None, 'failed first home blocked independent second home')
+    _require(len(created) == 1, 'second home did not create exactly one SDK client')

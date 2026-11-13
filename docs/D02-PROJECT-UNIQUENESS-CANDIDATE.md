@@ -10,19 +10,19 @@ Using non-network synthetic credentials and a constructor spy, two distinct prof
 
 The candidate records separate in-memory SHA-256 digests of the public project key and secret key against the resolved profile home after successful client construction. Another home presenting either matching credential component is rejected before SDK construction, with a diagnostic containing no keys or profile identities. The existing first-build lock serialises race conditions.
 
-Four added source tests cover identical keypairs, the same public key with a different secret, the same secret with a different public key, and concurrent cold client builds with an identical project key. One further regression uses the real pinned Hermes gateway profile runtime-scope binder, verifying credential/home context resets and rejecting a reused secret with another public key. This extends the strict source suite from 202 to **207 tests**. The separate v0.23 updater control remains 10 tests.
+Four added source tests cover identical keypairs, the same public key with a different secret, the same secret with a different public key, and concurrent cold client builds with an identical project key. One further regression uses the real pinned Hermes gateway profile runtime-scope binder, verifying credential/home context resets and rejecting a reused secret with another public key. This extends the strict source suite from 202 to **208 tests**. The separate v0.23 updater control remains 10 tests.
 
 ## Boundaries and required evidence
 
 - Source code and CI tests do not change credentials, Langfuse projects, deployed plugins or QA service settings. Separately authorised isolated integration tests used two new disposable QA projects and expiring credentials; the existing project/key was preserved.
-- The registries are in process memory only and do not log either key, its digest, or an identity.
+- The registries are in process memory only and do not log either key, its digest, or an identity. **The guard only covers profiles hosted in the same Hermes process**: separately running gateways, CLI commands and workers have independent registries, so cross-process project uniqueness requires an operational project/egress check.
 - No hot credential rotation: changes require restart as with the existing immutable client cache.
 - Distinct public and secret API key pairs can refer to the SAME backend project. This source guard cannot prove project uniqueness across different keys; independent D02 live project-ID/egress qualification is still mandatory.
 - Host aliases and endpoint aliases with distinct keys are likewise outside this source guard.
 - D01 identity attribution remains disabled until queued-exporter discard is proven.
 - All four pinned core/SDK CI cells, independent exact-diff review, and operational T01/T08 evidence remain acceptance gates. Do not merge/install on source-only proof.
 
-The original PR #3 202-test receipts remain historical source-only evidence and are not re-labelled as 207-test results.
+The original PR #3 202-test receipts remain historical source-only evidence and are not re-labelled as 208-test results.
 
 ## 13 November QA-only operational evidence (not a live gateway deployment)
 
@@ -31,3 +31,10 @@ With owner approval, two disposable QA projects and expiring test-only credentia
 Read-only exact-name checks against Langfuse v4 ClickHouse `events_core` and `events_full` showed the expected project ID and empty `user_id` for every synthetic record, without reading historical trace contents. Private receipts reside at `/srv/scratch/obs002-closure-20261106/receipts/20261113-verified/`; no credential values appear in this document or repository.
 
 The additional gateway-binder source regression is enforced in all four pinned Hermes/SDK CI combinations. The source suite now expects **207 tests, zero skipped or failed**. This is **not proof of a launched multiplexed gateway** or of automatic detection when two independently issued API key pairs map to one backend project. Full D02 operational acceptance and independent review remain outstanding.
+
+## Independent review findings addressed
+
+- **Process boundary:** fingerprint ownership operates only inside one running Hermes process. Separate gateway, cron and CLI processes have independent registries; cross-process uniqueness requires the separate operational project/egress check. First profile to build a client wins a reused credential in that process; later profiles are disabled until restart.
+- **Race validation:** a 25-ms synthetic SDK constructor delay widens the check/registration window. The lock-preserving test passed; in a separate throwaway copy only, replacing the lock with a no-op made that same test fail (mutation sensitivity proven). The source branch keeps the real lock.
+- **Diagnostics and constructor failure:** a new test confirms failed SDK construction never claims credentials; an existing collision test now checks the rejection log omits credentials and profile paths. Only the locked settle path calls the client builder.
+- **Normalisation:** Hermes home keys resolve filesystem paths, and secret values are whitespace-trimmed. Base URL is intentionally excluded from key matching: two different custom endpoints that reuse identical operator-issued keys may be rejected (fail closed), despite distinct projects.
