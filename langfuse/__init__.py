@@ -14,6 +14,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -77,6 +78,10 @@ _LANGFUSE_CLIENT = None
 # keys live in each profile's .env, so a single slot would trace profile B into profile A's project
 # (or pin B to A's failed init). The slot above stays for the unscoped single-profile path.
 _LANGFUSE_CLIENT_BY_HOME: dict[str, Any] = {}
+# D02/T08: profile-specific clients are not enough if two homes reuse one project
+# key. Hash the public project key so no credential value is retained in this map.
+# _settle_client() holds _LANGFUSE_CLIENT_LOCK across construction/registration.
+_LANGFUSE_PROJECT_OWNER_BY_KEY: dict[bytes, str] = {}
 # Separate from _STATE_LOCK (hot path) so the two never nest; serializes the
 # first client build so racing callers can't each construct a client.
 _LANGFUSE_CLIENT_LOCK = threading.Lock()
@@ -405,6 +410,24 @@ def _build_client() -> Optional[Langfuse]:
             "; ".join(prefix_issues),
         )
 
+    # D02 forbids deliberately shared Langfuse projects across profile homes.
+    # Reusing the same project public key is a demonstrable collision; reject the
+    # second home BEFORE instantiating a potentially exporting SDK client.
+    # Different API keys for one backend project cannot be distinguished here
+    # without a live project-identity check (a separate operational D02 gate).
+    from hermes_constants import hermes_home_key
+
+    home = hermes_home_key()
+    project_key_hash = hashlib.sha256(public_key.encode("utf-8")).digest()
+    existing_owner = _LANGFUSE_PROJECT_OWNER_BY_KEY.get(project_key_hash)
+    if existing_owner is not None and existing_owner != home:
+        logger.warning(
+            "Langfuse plugin: the same project public key belongs to another "
+            "Hermes profile; tracing is disabled for this profile. Use a distinct "
+            "Langfuse project/credential pair and restart."
+        )
+        return None
+
     kwargs: dict[str, Any] = {"public_key": public_key, "secret_key": secret_key}
     for key, name, default in (("base_url", "BASE_URL", "https://cloud.langfuse.com"), ("environment", "ENV", ""),
                                ("release", "RELEASE", "")):
@@ -426,7 +449,10 @@ def _build_client() -> Optional[Langfuse]:
     if default_service:
         os.environ["OTEL_SERVICE_NAME"] = "hermes-agent"
     try:
-        return Langfuse(**kwargs)
+        client = Langfuse(**kwargs)
+        if client is not None:
+            _LANGFUSE_PROJECT_OWNER_BY_KEY[project_key_hash] = home
+        return client
     except Exception as exc:  # pragma: no cover - fail-open
         logger.warning("Could not initialize Langfuse client: %s", exc)
         return None

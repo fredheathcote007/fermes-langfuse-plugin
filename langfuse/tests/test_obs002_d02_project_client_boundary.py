@@ -233,3 +233,50 @@ def test_cold_client_construction_race_is_serialised_for_distinct_profiles(bound
             _require(selected[0] is not selected[1], 'cold-start races shared a client across profiles')
             _require(selected[0]._kwargs['secret_key'] == a_keys['HERMES_LANGFUSE_SECRET_KEY'], 'cold A credential scope lost')
             _require(selected[1]._kwargs['secret_key'] == b_keys['HERMES_LANGFUSE_SECRET_KEY'], 'cold B credential scope lost')
+
+
+def test_distinct_profile_homes_must_reject_same_project_credential_pair(boundary):
+    """D02/T08: two profile homes may not share a project or credential pair."""
+    mod, homes, created = boundary
+    shared = _values('shared-project')
+    with _serve(homes[0], shared):
+        client_a = mod._get_langfuse()
+    _require(client_a is not None, 'initial synthetic profile client missing')
+    with _serve(homes[1], shared):
+        client_b = mod._get_langfuse()
+    _require(client_b is None, 'different profile reused an already-owned project credential pair')
+    _require(len(created) == 1, 'a second SDK exporter was constructed for a shared project')
+
+
+def test_distinct_profile_homes_reject_same_project_key_even_after_secret_rotation(boundary):
+    """D02: a second API secret must not let another home claim the same project."""
+    mod, homes, created = boundary
+    original = _values('project-original')
+    rotated = _values('project-rotated')
+    rotated['HERMES_LANGFUSE_PUBLIC_KEY'] = original['HERMES_LANGFUSE_PUBLIC_KEY']
+    with _serve(homes[0], original):
+        _require(mod._get_langfuse() is not None, 'initial project client was not built')
+    with _serve(homes[1], rotated):
+        _require(mod._get_langfuse() is None, 'same project key bypassed collision using another secret')
+    _require(len(created) == 1, 'second SDK client was constructed for duplicate project')
+
+
+def test_concurrent_cold_homes_cannot_both_claim_shared_project_key(boundary):
+    """D02: serialised first-build reservation must reject one racing profile."""
+    mod, homes, created = boundary
+    shared = _values('concurrent-shared')
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for round_number in range(32):
+            mod._LANGFUSE_CLIENT_BY_HOME.clear()
+            mod._LANGFUSE_PROJECT_OWNER_BY_KEY.clear()
+            barrier = Barrier(2)
+
+            def start(home):
+                with _serve(home, shared):
+                    barrier.wait(timeout=4)
+                    return mod._get_langfuse()
+
+            left = pool.submit(start, homes[0]); right = pool.submit(start, homes[1])
+            a, b = left.result(timeout=8), right.result(timeout=8)
+            _require((a is None) != (b is None), 'two profiles both accepted or both rejected shared project')
+            _require(len(created) == round_number + 1, 'duplicate exporter constructed during project-key race')
