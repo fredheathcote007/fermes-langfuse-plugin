@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+import hashlib
 import importlib
 import time
 import sys
@@ -249,6 +250,8 @@ def test_distinct_profile_homes_must_reject_same_project_credential_pair(boundar
     _require('already owned by another Hermes profile' in caplog.text, 'missing collision diagnostic')
     for sensitive in (shared['HERMES_LANGFUSE_PUBLIC_KEY'],
                       shared['HERMES_LANGFUSE_SECRET_KEY'],
+                      hashlib.sha256(shared['HERMES_LANGFUSE_PUBLIC_KEY'].encode()).hexdigest(),
+                      hashlib.sha256(shared['HERMES_LANGFUSE_SECRET_KEY'].encode()).hexdigest(),
                       str(homes[0]), str(homes[1])):
         _require(sensitive not in caplog.text, 'collision diagnostic exposed credential or home')
 
