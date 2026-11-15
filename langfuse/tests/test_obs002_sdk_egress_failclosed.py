@@ -27,4 +27,5 @@ def test_plugin_sdk_export_omits_optional_sender_identity(tmp_path, optin):
     assert receipt['status'] == 'PASS'
     assert receipt['exported_spans'] >= 1
     assert receipt['optional_identity_absent'] is True
-    assert receipt['network'] == 'in-process exporter only'
+    assert receipt['network'] == 'no Python-level socket DNS/connect/send attempted'
+    assert receipt['network_attempts'] == 0
