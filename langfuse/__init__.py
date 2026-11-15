@@ -862,7 +862,7 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     trace_scope = turn_id or api_request_id or task_id or task_key
     trace_id = client.create_trace_id(seed=f"{session_id or 'sessionless'}::{trace_scope}")
     # A delegated subagent's turn: join the parent's trace under its "Subagent" observation.
-    nested = _SUBAGENT_PARENT_BY_CHILD.get(_profile_attribution_key(str(session_id))) if session_id else None
+    nested = _SUBAGENT_PARENT_BY_CHILD.get(_profile_attribution_key(session_id)) if session_id else None
     last_user = next((m for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user"), None) \
         if isinstance(messages, list) else None
     trace_input = None if last_user is None else {"role": "user", "content": _capture_content(last_user.get("content"))}
