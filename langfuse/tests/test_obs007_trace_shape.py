@@ -173,3 +173,13 @@ def test_profile_ref_distinguishes_homes_without_exporting_the_path(monkeypatch,
         assert re.fullmatch(r'[0-9a-f]{12}', metadata['profile_ref'])
         assert str(tmp_path) not in json.dumps(metadata) and name not in metadata['profile_ref']
     assert refs[0] != refs[1]
+
+
+def test_profile_ref_is_empty_when_the_home_key_is_unusable(monkeypatch):
+    """No constant digest of "None" or "": an unresolvable home exports no profile_ref."""
+    sys.modules.pop('langfuse_plugin', None)
+    mod = importlib.import_module('langfuse_plugin')
+    import hermes_constants
+    for bad in (None, ''):
+        monkeypatch.setattr(hermes_constants, 'hermes_home_key', lambda bad=bad: bad)
+        assert mod._profile_ref() == ''

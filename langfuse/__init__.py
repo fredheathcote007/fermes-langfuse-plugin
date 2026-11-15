@@ -936,14 +936,20 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     return TraceState(trace_id=trace_id, root_span=root_span, propagated=propagated, nested=nested is not None)
 
 
+@functools.lru_cache(maxsize=64)
+def _profile_ref_for(home_key: str) -> str:
+    return hashlib.sha256(home_key.encode("utf-8")).hexdigest()[:12]
+
+
 def _profile_ref() -> str:
     """12-hex SHA-256 digest of the resolved Hermes home: distinguishes profiles in exported metadata
-    without exporting the home path. ``""`` if the home cannot be resolved."""
+    without exporting the home path. ``""`` if the home cannot be resolved (never a constant digest)."""
     try:
         from hermes_constants import hermes_home_key
-        return hashlib.sha256(str(hermes_home_key()).encode("utf-8")).hexdigest()[:12]
+        home_key = hermes_home_key()
     except Exception:
         return ""
+    return _profile_ref_for(home_key) if isinstance(home_key, str) and home_key else ""
 
 
 def _start_child_observation(state: TraceState, *, name: str, as_type: str, input_value: Any,
