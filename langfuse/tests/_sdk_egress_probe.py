@@ -38,14 +38,11 @@ network_attempts = []
 def deny_network(*args, **kwargs):
     network_attempts.append('attempt')
     raise AssertionError('unexpected DNS or network operation from SDK-backed probe')
-class DeniedSocket(socket.socket):
-    def connect(self, *args, **kwargs): return deny_network(*args, **kwargs)
-    def connect_ex(self, *args, **kwargs): return deny_network(*args, **kwargs)
-    def send(self, *args, **kwargs): return deny_network(*args, **kwargs)
-    def sendall(self, *args, **kwargs): return deny_network(*args, **kwargs)
-    def sendto(self, *args, **kwargs): return deny_network(*args, **kwargs)
-    def sendmsg(self, *args, **kwargs): return deny_network(*args, **kwargs)
-socket.socket = DeniedSocket
+# Patch the methods on socket.socket itself rather than swapping in a subclass, so modules that
+# already hold a reference to the class (``from socket import socket``, imported above via the SDK)
+# and pre-existing socket instances are intercepted too.
+for _method in ('connect', 'connect_ex', 'send', 'sendall', 'sendto', 'sendmsg'):
+    setattr(socket.socket, _method, deny_network)
 socket.create_connection = deny_network
 socket.getaddrinfo = deny_network
 socket.gethostbyname = deny_network

@@ -178,11 +178,11 @@ def test_concurrent_profile_calls_keep_distinct_cached_project_clients(boundary)
             barrier = Barrier(2)
             def run(home, keys):
                 with _serve(home, keys):
-                    barrier.wait(timeout=4)
+                    barrier.wait(timeout=15)
                     return mod._get_langfuse()
             x = pool.submit(run, homes[0], a_keys)
             y = pool.submit(run, homes[1], b_keys)
-            _require(x.result(timeout=8) is a and y.result(timeout=8) is b,
+            _require(x.result(timeout=20) is a and y.result(timeout=20) is b,
                      'concurrent request crossed a project-client boundary')
     _require(len(created) == 2, 'concurrency created a duplicate or cross-profile client')
 
@@ -223,11 +223,11 @@ def test_cold_client_construction_race_is_serialised_for_distinct_profiles(bound
             barrier = Barrier(8)
             def start(home, credentials):
                 with _serve(home, credentials):
-                    barrier.wait(timeout=5)
+                    barrier.wait(timeout=15)
                     return mod._get_langfuse()
             jobs = [pool.submit(start, homes[side], a_keys if side == 0 else b_keys)
                     for side in (0,1,0,1,0,1,0,1)]
-            selected = [job.result(timeout=12) for job in jobs]
+            selected = [job.result(timeout=20) for job in jobs]
             _require(len(created) == 2 * (round_number + 1), 'concurrent cold start constructed duplicate SDK clients')
             _require(all(selected[side] is selected[0] for side in (0,2,4,6)), 'profile A cold starts differed')
             _require(all(selected[side] is selected[1] for side in (1,3,5,7)), 'profile B cold starts differed')

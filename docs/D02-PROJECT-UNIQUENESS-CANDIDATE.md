@@ -10,7 +10,7 @@ Using non-network synthetic credentials and a constructor spy, two distinct prof
 
 The candidate records separate in-memory SHA-256 digests of the public project key and secret key against the resolved profile home after successful client construction. Another home presenting either matching credential component is rejected before SDK construction, with a diagnostic containing no keys or profile identities. The existing first-build lock serialises race conditions.
 
-Four added source tests cover identical keypairs, the same public key with a different secret, the same secret with a different public key, and concurrent cold client builds with an identical project key. One further regression uses the real pinned Hermes gateway profile runtime-scope binder, verifying credential/home context resets and rejecting a reused secret with another public key. A sixth regression confirms that a failed SDK constructor never claims project credentials. This extends the strict source suite from 202 to **208 tests**. The separate v0.23 updater control remains 10 tests.
+Four added source tests cover identical keypairs, the same public key with a different secret, the same secret with a different public key, and concurrent cold client builds with an identical project key. One further regression uses the real pinned Hermes gateway profile runtime-scope binder, verifying credential/home context resets and rejecting a reused secret with another public key. A sixth regression confirms that a failed SDK constructor never claims project credentials. This extends the strict source suite from 202 to **208 tests** (212 after merging the PR #1 Gemini review fixes). The separate v0.23 updater control remains 10 tests.
 
 ## Boundaries and required evidence
 
@@ -30,7 +30,7 @@ With owner approval, two disposable QA projects and expiring test-only credentia
 
 Read-only exact-name checks against Langfuse v4 ClickHouse `events_core` and `events_full` showed the expected project ID and empty `user_id` for every synthetic record, without reading historical trace contents. Private receipts reside at `/srv/scratch/obs002-closure-20261106/receipts/20261113-verified/`; no credential values appear in this document or repository.
 
-The additional gateway-binder source regression is enforced in all four pinned Hermes/SDK CI combinations. The source suite now expects **208 tests, zero skipped or failed**. This is **not proof of a launched multiplexed gateway** or of automatic detection when two independently issued API key pairs map to one backend project. Full D02 operational acceptance and independent review remain outstanding.
+The additional gateway-binder source regression is enforced in all four pinned Hermes/SDK CI combinations. The source suite now expects **212 tests, zero skipped or failed** (208 plus the 4 PR #1 Gemini-review regressions). This is **not proof of a launched multiplexed gateway** or of automatic detection when two independently issued API key pairs map to one backend project. Full D02 operational acceptance and independent review remain outstanding.
 
 ## Independent review findings addressed
 
