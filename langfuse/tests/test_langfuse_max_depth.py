@@ -13,9 +13,13 @@ def _fresh_max_depth_cache():
     or an earlier resolution of the same invalid value (another test, a repeat run)
     silently turns the "exactly one warning" assertions into 0 warnings."""
     plugin = importlib.import_module("langfuse_plugin")
-    plugin._resolve_max_depth.cache_clear()
+    for resolver in ("_resolve_max_depth", "_resolve_max_chars"):
+        if hasattr(plugin, resolver):
+            getattr(plugin, resolver).cache_clear()
     yield
-    plugin._resolve_max_depth.cache_clear()
+    for resolver in ("_resolve_max_depth", "_resolve_max_chars"):
+        if hasattr(plugin, resolver):
+            getattr(plugin, resolver).cache_clear()
 
 
 @pytest.mark.parametrize("mode", ["sanitized", "full"])
@@ -80,3 +84,17 @@ def test_invalid_max_depth_warns_once_per_value_not_per_payload(monkeypatch, cap
     for _ in range(3):
         plugin._capture_content(payload)
     assert sum("HERMES_LANGFUSE_MAX_DEPTH" in r.getMessage() for r in caplog.records) == 2
+
+
+@pytest.mark.parametrize("invalid_chars", ["abc", "-5", "12k"])
+def test_invalid_max_chars_warns_once_and_falls_back_instead_of_raising(monkeypatch, caplog, invalid_chars):
+    """A bad ``HERMES_LANGFUSE_MAX_CHARS`` used to raise ValueError from every ``_safe_value`` call,
+    dropping the payload capture; it must fall back to 12000 with one warning (Gemini review on PR #1)."""
+    plugin = importlib.import_module("langfuse_plugin")
+    monkeypatch.setenv("HERMES_LANGFUSE_CAPTURE", "full")
+    monkeypatch.setenv("HERMES_LANGFUSE_MAX_CHARS", invalid_chars)
+    with caplog.at_level("WARNING"):
+        first = plugin._safe_value("x" * 20000)
+        plugin._safe_value("y" * 20000)
+    assert first == plugin._truncate_text("x" * 20000, 12000)
+    assert sum("HERMES_LANGFUSE_MAX_CHARS" in r.getMessage() for r in caplog.records) == 1

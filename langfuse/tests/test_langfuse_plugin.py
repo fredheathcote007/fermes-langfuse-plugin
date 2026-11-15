@@ -1461,6 +1461,21 @@ class TestCaptureModes:
                        "total_tokens": 70, "port": 5432}
 
 
+    def test_sanitized_mode_masks_structured_secret_fields(self, monkeypatch):
+        """A list/dict under a secret field name was recursed into instead of masked; its inner
+        values sit under no secret-named key, so they exported raw (Gemini review on PR #1)."""
+        mod = self._fresh_plugin()
+        monkeypatch.setenv("HERMES_LANGFUSE_CAPTURE", "sanitized")
+        a, b = "opaqTokA-" + "7Qm2Xv9LkP4zR8wN", "opaqTokB-" + "1bY6Lk4zR8wN7Qm2"
+        inner = {"token": [a, b], "credentials": {"user": "svc", "value": a}, "password": "",
+                 "username": "alice", "total_tokens": 70}
+        out = self._exported_tool_output(mod, monkeypatch, json.dumps({"output": json.dumps(inner)}))["output"]
+        assert out == {"token": "[REDACTED]", "credentials": "[REDACTED]", "password": "",
+                       "username": "alice", "total_tokens": 70}
+        monkeypatch.setenv("HERMES_LANGFUSE_CAPTURE", "full")
+        assert self._exported_tool_output(mod, monkeypatch, json.dumps({"output": json.dumps(inner)}))["output"] == inner
+
+
 # ---------------------------------------------------------------------------
 # api_request_error hook
 # ---------------------------------------------------------------------------
