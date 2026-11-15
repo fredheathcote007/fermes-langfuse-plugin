@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+import hashlib
 import importlib
 import time
 import sys
@@ -233,3 +234,133 @@ def test_cold_client_construction_race_is_serialised_for_distinct_profiles(bound
             _require(selected[0] is not selected[1], 'cold-start races shared a client across profiles')
             _require(selected[0]._kwargs['secret_key'] == a_keys['HERMES_LANGFUSE_SECRET_KEY'], 'cold A credential scope lost')
             _require(selected[1]._kwargs['secret_key'] == b_keys['HERMES_LANGFUSE_SECRET_KEY'], 'cold B credential scope lost')
+
+
+def test_distinct_profile_homes_must_reject_same_project_credential_pair(boundary, caplog):
+    """D02/T08: reject shared credentials without logging keys or profile paths."""
+    mod, homes, created = boundary
+    shared = _values('shared-project')
+    with _serve(homes[0], shared):
+        client_a = mod._get_langfuse()
+    _require(client_a is not None, 'initial synthetic profile client missing')
+    with _serve(homes[1], shared):
+        client_b = mod._get_langfuse()
+    _require(client_b is None, 'different profile reused an already-owned project credential pair')
+    _require(len(created) == 1, 'a second SDK exporter was constructed for a shared project')
+    _require('already owned by another Hermes profile' in caplog.text, 'missing collision diagnostic')
+    for sensitive in (shared['HERMES_LANGFUSE_PUBLIC_KEY'],
+                      shared['HERMES_LANGFUSE_SECRET_KEY'],
+                      hashlib.sha256(shared['HERMES_LANGFUSE_PUBLIC_KEY'].encode()).hexdigest(),
+                      hashlib.sha256(shared['HERMES_LANGFUSE_SECRET_KEY'].encode()).hexdigest(),
+                      str(homes[0]), str(homes[1])):
+        _require(sensitive not in caplog.text, 'collision diagnostic exposed credential or home')
+
+
+def test_distinct_profile_homes_reject_same_project_key_even_after_secret_rotation(boundary):
+    """D02: a second API secret must not let another home claim the same project."""
+    mod, homes, created = boundary
+    original = _values('project-original')
+    rotated = _values('project-rotated')
+    rotated['HERMES_LANGFUSE_PUBLIC_KEY'] = original['HERMES_LANGFUSE_PUBLIC_KEY']
+    with _serve(homes[0], original):
+        _require(mod._get_langfuse() is not None, 'initial project client was not built')
+    with _serve(homes[1], rotated):
+        _require(mod._get_langfuse() is None, 'same project key bypassed collision using another secret')
+    _require(len(created) == 1, 'second SDK client was constructed for duplicate project')
+
+
+def test_concurrent_cold_homes_cannot_both_claim_shared_project_key(boundary, monkeypatch):
+    """D02: a widened SDK build race must not construct two exporters."""
+    mod, homes, created = boundary
+    shared = _values('concurrent-shared')
+    original_construct = mod.Langfuse
+
+    def slow_construct(**kwargs):
+        # Force an overlapping first-build window; without the client lock,
+        # both threads can enter here before either key is registered.
+        time.sleep(0.025)
+        return original_construct(**kwargs)
+
+    monkeypatch.setattr(mod, 'Langfuse', slow_construct)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for round_number in range(32):
+            mod._LANGFUSE_CLIENT_BY_HOME.clear()
+            mod._LANGFUSE_PROJECT_OWNER_BY_KEY.clear()
+            mod._LANGFUSE_SECRET_OWNER_BY_KEY.clear()
+            barrier = Barrier(2)
+
+            def start(home):
+                with _serve(home, shared):
+                    barrier.wait(timeout=4)
+                    return mod._get_langfuse()
+
+            left = pool.submit(start, homes[0]); right = pool.submit(start, homes[1])
+            a, b = left.result(timeout=8), right.result(timeout=8)
+            _require((a is None) != (b is None), 'two profiles both accepted or both rejected shared project')
+            _require(len(created) == round_number + 1, 'duplicate exporter constructed during project-key race')
+
+
+def test_distinct_profile_homes_reject_same_secret_with_different_public_key(boundary):
+    """D02/T08: Langfuse API routing by secret cannot bypass profile ownership."""
+    mod, homes, created = boundary
+    original = _values('original-secret-owner')
+    mismatched = _values('other-public-same-secret')
+    mismatched['HERMES_LANGFUSE_SECRET_KEY'] = original['HERMES_LANGFUSE_SECRET_KEY']
+    with _serve(homes[0], original):
+        _require(mod._get_langfuse() is not None, 'original profile client missing')
+    with _serve(homes[1], mismatched):
+        _require(mod._get_langfuse() is None, 'reused secret bypassed project ownership guard')
+    _require(len(created) == 1, 'second SDK exporter constructed for shared secret')
+
+
+def test_real_gateway_profile_runtime_scope_rejects_cross_profile_project_secrets(boundary):
+    """D02/T08: bind the real gateway scope, not a synthetic substitute."""
+    from gateway.run import _profile_runtime_scope
+    from hermes_constants import get_hermes_home_override
+
+    mod, homes, created = boundary
+    a = _values('gateway-a')
+    b = _values('gateway-b')
+    with _profile_runtime_scope(homes[0], a):
+        client_a = mod._get_langfuse()
+        _require(client_a is not None, 'gateway A failed to build its scoped client')
+        _require(client_a is mod._get_langfuse(), 'gateway A did not retain its client')
+    _require(get_hermes_home_override() is None, 'gateway A leaked home override')
+    _require(secret_scope.current_secret_scope() is None, 'gateway A leaked credential scope')
+
+    with _profile_runtime_scope(homes[1], b):
+        client_b = mod._get_langfuse()
+        _require(client_b is not None and client_b is not client_a, 'gateway B reused A SDK client')
+    _require(get_hermes_home_override() is None, 'gateway B leaked home override')
+    _require(secret_scope.current_secret_scope() is None, 'gateway B leaked credential scope')
+
+    cross = dict(b)
+    cross['HERMES_LANGFUSE_SECRET_KEY'] = a['HERMES_LANGFUSE_SECRET_KEY']
+    with _profile_runtime_scope(homes[2], cross):
+        _require(mod._get_langfuse() is None, 'gateway C accepted A secret with B public key')
+    _require(len(created) == 2, 'negative gateway scope constructed an SDK client')
+    _require(get_hermes_home_override() is None, 'gateway C leaked home override')
+    _require(secret_scope.current_secret_scope() is None, 'gateway C leaked credential scope')
+
+
+def test_failed_sdk_constructor_does_not_claim_shared_project_credentials(boundary, monkeypatch):
+    """D02/T08: a failed first SDK construction cannot reserve a project forever."""
+    mod, homes, created = boundary
+    shared = _values('constructor-fail')
+    original_construct = mod.Langfuse
+    first = [True]
+
+    def fail_first_build(**kwargs):
+        if first[0]:
+            first[0] = False
+            raise RuntimeError('synthetic SDK constructor failure')
+        return original_construct(**kwargs)
+
+    monkeypatch.setattr(mod, 'Langfuse', fail_first_build)
+    with _serve(homes[0], shared):
+        _require(mod._get_langfuse() is None, 'failed constructor leaked an SDK client')
+    _require(not mod._LANGFUSE_PROJECT_OWNER_BY_KEY, 'failed constructor claimed public key')
+    _require(not mod._LANGFUSE_SECRET_OWNER_BY_KEY, 'failed constructor claimed secret key')
+    with _serve(homes[1], shared):
+        _require(mod._get_langfuse() is not None, 'failed first home blocked independent second home')
+    _require(len(created) == 1, 'second home did not create exactly one SDK client')
