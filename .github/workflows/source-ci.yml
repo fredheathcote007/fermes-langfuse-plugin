@@ -111,8 +111,8 @@ jobs:
           skips = int(suite.get('skipped', '-1'))
           failures = int(suite.get('failures', '-1'))
           errors = int(suite.get('errors', '-1'))
-          assert (tests, skips, failures, errors) == (191, 0, 0, 0), (tests, skips, failures, errors)
-          print('OBS002_FULL_TEST_ORACLE=PASS: 191 collected, 0 skipped, 0 failures, 0 errors')
+          assert (tests, skips, failures, errors) == (195, 0, 0, 0), (tests, skips, failures, errors)
+          print('OBS002_FULL_TEST_ORACLE=PASS: 195 collected, 0 skipped, 0 failures, 0 errors')
           PYTEST_ORACLE
       - name: Record source-only compatibility receipt
         if: always()
@@ -190,7 +190,7 @@ jobs:
                   'D04 seven-day retention and configuration-only recovery',
               ],
           }
-          if test_counts != {'tests':191,'skipped':0,'failures':0,'errors':0} and receipt['status'] == 'PASS':
+          if test_counts != {'tests':195,'skipped':0,'failures':0,'errors':0} and receipt['status'] == 'PASS':
               receipt['status'] = 'FAIL'
           if receipt['core_actual_sha'] != receipt['core_expected_sha']:
               receipt['status'] = 'FAIL'

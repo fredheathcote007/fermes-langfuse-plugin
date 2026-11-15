@@ -27,7 +27,7 @@ Date: 2026-11-06. Scope: **source-only compatibility, no installation or merge**
 
 ## Acceptance boundary
 
-Four source CI combinations: earlier Fermes core and Hermes v0.23.0, each with Langfuse SDK 4.15.2 and 4.18.0 on Python 3.14. This matrix uses immutable source refs, a plugin admission check, the complete `langfuse/tests/` suite with exactly 191 collected and zero skipped, and a synthetic SDK-backed no-network egress probe. Each cell uploads a seven-day source-only receipt. Any failed/skipped/blocked required test is not a pass.
+Four source CI combinations: earlier Fermes core and Hermes v0.23.0, each with Langfuse SDK 4.15.2 and 4.18.0 on Python 3.14. This matrix uses immutable source refs, a plugin admission check, the complete `langfuse/tests/` suite with exactly 195 collected and zero skipped (191 before the Gemini review fixes in PR #1), and a synthetic SDK-backed no-network egress probe. Each cell uploads a seven-day source-only receipt. Any failed/skipped/blocked required test is not a pass.
 
 **Explicitly outside this source-only qualification:** gateway deployment, profile credential or project changes (D02), plugin update/installer actions on running systems, SDK queue purge after consent revocation (D01), seven-day storage retention/configuration recovery (D04), production, source or catalogue merge. No source-level PASS proves those operational requirements.
 
