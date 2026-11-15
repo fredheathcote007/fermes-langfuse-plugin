@@ -55,6 +55,9 @@ class TraceState:
     last_updated_at: float = field(default_factory=time.time)
     # propagate_attributes() kwargs the root was opened with, re-applied to every child.
     propagated: dict[str, Any] = field(default_factory=dict)
+    # True when this root is a delegated subagent's turn opened INSIDE its parent's trace: it must
+    # never set trace-level I/O, which belongs to the parent turn.
+    nested: bool = False
 
 
 # Child observation creation re-checks attribution centrally.  Several callers already
@@ -73,6 +76,12 @@ _MAX_TRACE_STATE = 256
 # like the trace state and guarded by ``_STATE_LOCK``.
 _SENDER_BY_TURN: OrderedDict[str, str] = OrderedDict()
 _USER_BY_CHILD_SESSION: OrderedDict[str, str] = OrderedDict()
+# Profile-scoped child_session_id -> (parent trace id, parent "Subagent" observation, parent trace
+# attributes). A delegated subagent's own turn opens as a child of that observation, in the parent's
+# trace, instead of as an unlinked trace. Guarded by ``_STATE_LOCK``; bounded like the maps above.
+_SUBAGENT_PARENT_BY_CHILD: OrderedDict[str, tuple[str, Any, dict[str, Any]]] = OrderedDict()
+_TRACE_ID_RE = re.compile(r"[0-9a-f]{32}")
+_SPAN_ID_RE = re.compile(r"[0-9a-f]{16}")
 _LANGFUSE_CLIENT = None
 # Under a multiplexed profile override, one settled client (or _INIT_FAILED) per Hermes home: the
 # keys live in each profile's .env, so a single slot would trace profile B into profile A's project
@@ -520,7 +529,7 @@ def _trace_key(task_id: str, session_id: str, *, turn_id: str = "", api_request_
     return prefix + (task_id or scope)
 
 
-def _remember_locked(mapping: OrderedDict, key: str, value: str) -> None:
+def _remember_locked(mapping: OrderedDict, key: str, value: Any) -> None:
     """Caller holds ``_STATE_LOCK``. Insert or refresh ``key``, dropping the oldest entries over the cap."""
     mapping[key] = value
     mapping.move_to_end(key)
@@ -852,12 +861,18 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     # without a turn boundary) so every emitted root has a distinct Cloud ID.
     trace_scope = turn_id or api_request_id or task_id or task_key
     trace_id = client.create_trace_id(seed=f"{session_id or 'sessionless'}::{trace_scope}")
+    # A delegated subagent's turn: join the parent's trace under its "Subagent" observation.
+    nested = _SUBAGENT_PARENT_BY_CHILD.get(_profile_attribution_key(str(session_id))) if session_id else None
     last_user = next((m for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user"), None) \
         if isinstance(messages, list) else None
     trace_input = None if last_user is None else {"role": "user", "content": _capture_content(last_user.get("content"))}
     # The profile the turn runs FOR (ctx.profile_name follows the routed home under multiplexing,
     # not the launch profile), so traces from several profiles in one project can be told apart.
     profile = _PLUGIN_CTX.profile_name if _PLUGIN_CTX is not None else ""
+    # ``profile_name`` is "custom" for every home outside ~/.hermes/profiles/<name>, so it cannot tell
+    # two such profiles apart. A short one-way digest of the resolved home can, without the path
+    # itself ever leaving the machine.
+    profile_ref = _profile_ref()
     # A dispatcher-spawned kanban worker gets its board task / run id in its env, so its traces can
     # be joined back to the card without guessing from session names. Omitted outside kanban.
     kanban = {k: v for k, v in (("kanban_task_id", _env("HERMES_KANBAN_TASK")),
@@ -865,21 +880,37 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     metadata = {
         "source": "hermes", "task_id": task_id, "turn_id": turn_id, "api_request_id": api_request_id,
         "platform": platform, "provider": provider, "model": model, "api_mode": api_mode,
-        "capture_mode": _capture_mode(), "profile": profile, **kanban,
+        "capture_mode": _capture_mode(), "profile": profile, **({"profile_ref": profile_ref} if profile_ref else {}),
+        **kanban,
     }
     # session_id must be in trace_context for Langfuse session grouping.
     trace_ctx: dict[str, Any] = {"trace_id": trace_id, **({"session_id": session_id} if session_id else {})}
+    root_name = "Hermes turn"
+    parent_observation = None
+    if nested is not None:
+        trace_id, parent_observation, parent_trace_attrs = nested
+        root_name = "Subagent turn"
+        metadata["child_session_id"] = session_id
 
     # Detached start_observation(), not start_as_current_observation(): the "current" variant pushes an OTEL
     # contextvars token that must be popped in the same context it was pushed in, but the root span is ended by
     # a later hook on another worker thread, so every turn logged "Failed to detach context" (hermes-agent#95057). A span
     # created inside propagate_attributes still carries its session / trace name / tags.
     def open_root():
-        return client.start_observation(trace_context=trace_ctx, name="Hermes turn", as_type="chain",
+        if parent_observation is not None:
+            # A true child of the parent's "Subagent" span: the SDK marks every trace_context start as
+            # a trace root (langfuse.internal.as_root), so a nested turn must not use trace_context.
+            return parent_observation.start_observation(name=root_name, as_type="chain",
+                                                        input=trace_input, metadata=metadata)
+        return client.start_observation(trace_context=trace_ctx, name=root_name, as_type="chain",
                                         input=trace_input, metadata=metadata)
 
     root_span = None
     propagated = {"session_id": session_id or _exported_key(task_key), "trace_name": "Hermes turn", "tags": _trace_tags(platform)}
+    if nested is not None:
+        # Trace-level attributes belong to the parent turn: re-propagating the child's own session or
+        # name on spans inside the parent trace would relabel the parent trace.
+        propagated = dict(parent_trace_attrs)
     # Langfuse userId is the end user (hermes-agent#44639): the platform's own sender id, verbatim, so
     # the Users view matches what the chat shows. The profile stays in metadata (hermes-agent#26455).
     if user_id and _identity_attribution_enabled():
@@ -897,11 +928,22 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
 
     # Trace-level I/O: set_trace_io() in the pinned SDK v4 (v3's update_trace() is gone, and
     # calling it failed open on every turn, leaving traces without input/output: hermes-agent#94710).
-    with _failsafe("set_trace_io(input)"):
-        root_span.set_trace_io(input=trace_input)
+    if nested is None:
+        with _failsafe("set_trace_io(input)"):
+            root_span.set_trace_io(input=trace_input)
 
-    _debug(f"started trace {trace_id} for {task_key}")
-    return TraceState(trace_id=trace_id, root_span=root_span, propagated=propagated)
+    _debug(f"started {'nested ' if nested is not None else ''}trace {trace_id} for {task_key}")
+    return TraceState(trace_id=trace_id, root_span=root_span, propagated=propagated, nested=nested is not None)
+
+
+def _profile_ref() -> str:
+    """12-hex SHA-256 digest of the resolved Hermes home: distinguishes profiles in exported metadata
+    without exporting the home path. ``""`` if the home cannot be resolved."""
+    try:
+        from hermes_constants import hermes_home_key
+        return hashlib.sha256(str(hermes_home_key()).encode("utf-8")).hexdigest()[:12]
+    except Exception:
+        return ""
 
 
 def _start_child_observation(state: TraceState, *, name: str, as_type: str, input_value: Any,
@@ -1011,7 +1053,9 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
         if final_output is not None:
             # set_trace_io sets TRACE-level I/O (SDK v4); root I/O via update().
             # Neither may prevent end(), else children export without a root.
-            for method, label in (("set_trace_io", "set_trace_io(output)"), ("update", "root update(output)")):
+            methods = (("update", "root update(output)"),) if state.nested else \
+                (("set_trace_io", "set_trace_io(output)"), ("update", "root update(output)"))
+            for method, label in methods:
                 with _failsafe(label):
                     getattr(state.root_span, method)(output=final_output)
         _end_root(state, "root end()")
@@ -1410,9 +1454,19 @@ def on_subagent_start(*, parent_turn_id: str = "", parent_subagent_id: Any = Non
         # A subagent has no sender of its own: its traces belong to the user whose turn spawned it.
         if state.propagated.get("user_id"):
             _remember_locked(_USER_BY_CHILD_SESSION, _profile_attribution_key(str(child_session_id)), state.propagated["user_id"])
-        state.subagents[str(child_session_id)] = _start_child_observation(
+        observation = _start_child_observation(
             state, name=f"Subagent: {child_role or 'delegate'}", as_type="span",
             input_value=_capture_content(child_goal), metadata=metadata)
+        state.subagents[str(child_session_id)] = observation
+        parent_span_id = getattr(observation, "id", None)
+        # Link the child's own turn into this trace only for a real SDK span (Langfuse trace and span
+        # ids, and a span that can open children); otherwise it keeps its own trace, as before.
+        if (isinstance(parent_span_id, str) and _SPAN_ID_RE.fullmatch(parent_span_id)
+                and isinstance(state.trace_id, str) and _TRACE_ID_RE.fullmatch(state.trace_id)
+                and callable(getattr(observation, "start_observation", None))):
+            attrs = {k: state.propagated[k] for k in ("session_id", "trace_name", "tags") if k in state.propagated}
+            _remember_locked(_SUBAGENT_PARENT_BY_CHILD, _profile_attribution_key(str(child_session_id)),
+                             (state.trace_id, observation, attrs))
 
 
 def on_subagent_stop(*, parent_turn_id: str = "", child_session_id: Any = None, child_role: str = "",
@@ -1423,6 +1477,7 @@ def on_subagent_stop(*, parent_turn_id: str = "", child_session_id: Any = None, 
 
     with _STATE_LOCK:
         _USER_BY_CHILD_SESSION.pop(_profile_attribution_key(str(child_session_id)), None)
+        _SUBAGENT_PARENT_BY_CHILD.pop(_profile_attribution_key(str(child_session_id)), None)
         state = _state_for_turn(parent_turn_id)
         if state is None:
             return
