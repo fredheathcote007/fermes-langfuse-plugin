@@ -24,4 +24,4 @@ Changes:
 
 Not changed: spans created while Langfuse is unreachable are still dropped rather than buffered to disk. That is SDK design, and is accepted under the D04 weekly-rotation decision.
 
-Tests: `tests/test_obs007_exit_and_queue.py` adds 15 cases, including real-SDK subprocess timing against unreachable and healthy loopback endpoints and an end-to-end OpenTelemetry queue overflow. The strict source suite goes from 218 to 233.
+Tests: `tests/test_obs007_exit_and_queue.py` adds 16 cases, including real-SDK subprocess timing against unreachable and healthy loopback endpoints and an end-to-end OpenTelemetry queue overflow. The strict source suite goes from 218 to 234.

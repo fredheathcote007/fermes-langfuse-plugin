@@ -210,7 +210,13 @@ def _bounded(label: str, fn: Callable[[], Any]) -> bool:
             done.set()
 
     timeout = _flush_timeout()
-    threading.Thread(target=run, name=f"langfuse-plugin-{label.replace(' ', '-')}", daemon=True).start()
+    try:
+        threading.Thread(target=run, name=f"langfuse-plugin-{label.replace(' ', '-')}", daemon=True).start()
+    except RuntimeError:
+        # No new threads late in interpreter shutdown on some Python versions: fall back to the
+        # previous synchronous (unbounded) call rather than skip the export work.
+        run()
+        return True
     if done.wait(timeout):
         return True
     logger.warning("Langfuse plugin: %s did not finish within %.1fs (Langfuse slow or unreachable); "

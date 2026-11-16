@@ -132,6 +132,19 @@ def test_bounded_returns_promptly_and_never_raises(monkeypatch):
     assert mod._bounded('boom', lambda: 1 / 0) is True  # an exception is swallowed, not raised
 
 
+def test_bounded_falls_back_to_a_direct_call_when_no_thread_can_start(monkeypatch):
+    mod = _plugin()
+
+    def refuse(self):
+        raise RuntimeError("can't create new thread at interpreter shutdown")
+
+    monkeypatch.setattr(threading.Thread, 'start', refuse)
+    calls = []
+    assert mod._bounded('exit flush', lambda: calls.append('ran')) is True
+    assert calls == ['ran']
+    assert mod._bounded('exit flush', lambda: 1 / 0) is True  # still never raises
+
+
 class _RecordingLangfuse:
     seen = []
 
