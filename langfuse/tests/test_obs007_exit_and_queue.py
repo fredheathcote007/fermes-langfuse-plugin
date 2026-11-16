@@ -109,6 +109,7 @@ def _plugin():
     sys.modules.pop('langfuse_plugin', None)
     mod = importlib.import_module('langfuse_plugin')
     mod._resolve_flush_timeout.cache_clear()
+    mod._resolve_export_timeout.cache_clear()
     return mod
 
 
@@ -175,8 +176,52 @@ def test_export_timeout_defaults_to_two_seconds_and_respects_operators(monkeypat
     mod = _plugin()
     assert _build(mod, monkeypatch)[0]['timeout'] == 2
     assert _build(mod, monkeypatch, HERMES_LANGFUSE_TIMEOUT='7')[0]['timeout'] == 7
-    assert 'timeout' not in _build(mod, monkeypatch, LANGFUSE_TIMEOUT='9')[0]  # the SDK reads its own variable
+    assert _build(mod, monkeypatch, LANGFUSE_TIMEOUT='9')[0]['timeout'] == 9  # read through the profile scope
+    assert _build(mod, monkeypatch, HERMES_LANGFUSE_TIMEOUT='4', LANGFUSE_TIMEOUT='9')[0]['timeout'] == 4
     assert _build(mod, monkeypatch, HERMES_LANGFUSE_TIMEOUT='zero')[0]['timeout'] == 2
+
+
+def test_invalid_export_timeout_warns_once_per_value(monkeypatch, caplog):
+    mod = _plugin()
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            assert mod._resolve_export_timeout('soon') == 2
+    assert sum('export timeout' in r.getMessage() for r in caplog.records) == 1
+
+
+def test_several_clients_close_in_parallel_within_one_bound(monkeypatch):
+    """Multiplexed exit: N unreachable clients must not cost N x the flush timeout."""
+    mod = _plugin()
+    monkeypatch.setenv('HERMES_LANGFUSE_FLUSH_TIMEOUT', '0.5')
+    release = threading.Event()
+
+    class _Slow:
+        def flush(self):
+            release.wait(5)
+
+        def shutdown(self):
+            pass
+
+    clients = [_Slow() for _ in range(4)]
+    start = time.monotonic()
+    mod._close_clients(clients)
+    assert time.monotonic() - start < 1.2  # ~one 0.5 s bound, not 4 x 0.5 s
+    release.set()
+    mod._close_clients(clients)  # already shut down: no second attempt, returns at once
+    assert time.monotonic() - start < 1.5
+
+
+def test_queue_size_can_be_set_per_profile(monkeypatch, tmp_path):
+    """Read through the profile secret scope like the keys, so a multiplexed profile can set it."""
+    mod = _plugin()
+    from agent import secret_scope
+    for key in ('HERMES_LANGFUSE_MAX_QUEUE_SIZE', 'OTEL_BSP_MAX_QUEUE_SIZE'):
+        monkeypatch.delenv(key, raising=False)
+    token = secret_scope.set_secret_scope({'HERMES_LANGFUSE_MAX_QUEUE_SIZE': '4096'}, profile_home=str(tmp_path))
+    try:
+        assert mod._max_queue_size() == '4096'
+    finally:
+        secret_scope.reset_secret_scope(token)
 
 
 def test_queue_size_is_set_only_for_construction_and_never_over_an_operator_value(monkeypatch):

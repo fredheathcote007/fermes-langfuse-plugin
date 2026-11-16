@@ -193,6 +193,23 @@ def _resolve_flush_timeout(configured: str) -> float:
         return _DEFAULT_FLUSH_TIMEOUT
 
 
+@functools.lru_cache(maxsize=8)
+def _resolve_export_timeout(configured: str) -> int:
+    """Export request timeout in whole seconds (SDK takes an int). Empty means the 2 s default; an
+    invalid value warns once per distinct value and uses the default."""
+    if not configured:
+        return _DEFAULT_EXPORT_TIMEOUT
+    try:
+        value = int(configured)
+        if value < 1:
+            raise ValueError
+        return value
+    except ValueError:
+        logger.warning("Invalid Langfuse export timeout %r (HERMES_LANGFUSE_TIMEOUT / LANGFUSE_TIMEOUT); use a whole "
+                       "number of seconds >= 1. Using %d.", configured, _DEFAULT_EXPORT_TIMEOUT)
+        return _DEFAULT_EXPORT_TIMEOUT
+
+
 def _flush_timeout() -> float:
     return _resolve_flush_timeout(_env("HERMES_LANGFUSE_FLUSH_TIMEOUT", "") or str(_DEFAULT_FLUSH_TIMEOUT))
 
@@ -200,29 +217,39 @@ def _flush_timeout() -> float:
 def _bounded(label: str, fn: Callable[[], Any]) -> bool:
     """Run exit-time export work, waiting at most ``_flush_timeout()`` seconds. Never raises; returns
     whether it finished in time. The daemon worker never keeps the process alive."""
-    done = threading.Event()
+    return _bounded_all([(label, fn)])
 
-    def run() -> None:
-        try:
-            with _failsafe(label):
-                fn()
-        finally:
-            done.set()
 
+def _bounded_all(jobs: list[tuple[str, Callable[[], Any]]]) -> bool:
+    """Run several pieces of exit-time export work in parallel, waiting at most ``_flush_timeout()``
+    seconds IN TOTAL (not per job), so several multiplexed clients cannot stretch process exit.
+    Never raises; returns whether every job finished in time."""
     timeout = _flush_timeout()
-    try:
-        threading.Thread(target=run, name=f"langfuse-plugin-{label.replace(' ', '-')}", daemon=True).start()
-    except RuntimeError:
-        # No new threads late in interpreter shutdown on some Python versions: fall back to the
-        # previous synchronous (unbounded) call rather than skip the export work.
-        run()
-        return True
-    if done.wait(timeout):
-        return True
-    logger.warning("Langfuse plugin: %s did not finish within %.1fs (Langfuse slow or unreachable); "
-                   "continuing without waiting. Unsent spans may be lost. Set HERMES_LANGFUSE_FLUSH_TIMEOUT "
-                   "to wait longer.", label, timeout)
-    return False
+    deadline = time.monotonic() + timeout
+    pending: list[tuple[str, threading.Event]] = []
+    for label, fn in jobs:
+        done = threading.Event()
+
+        def run(label: str = label, fn: Callable[[], Any] = fn, done: threading.Event = done) -> None:
+            try:
+                with _failsafe(label):
+                    fn()
+            finally:
+                done.set()
+
+        try:
+            threading.Thread(target=run, name=f"langfuse-plugin-{label.replace(' ', '-')}", daemon=True).start()
+        except RuntimeError:
+            # No new threads late in interpreter shutdown on some Python versions: fall back to the
+            # previous synchronous (unbounded) call rather than skip the export work.
+            run()
+        pending.append((label, done))
+    late = [label for label, done in pending if not done.wait(max(0.0, deadline - time.monotonic()))]
+    if late:
+        logger.warning("Langfuse plugin: %s did not finish within %.1fs (Langfuse slow or unreachable); "
+                       "continuing without waiting. Unsent spans may be lost. Set HERMES_LANGFUSE_FLUSH_TIMEOUT "
+                       "to wait longer.", ", ".join(late), timeout)
+    return not late
 
 
 # The OpenTelemetry batch queue drops spans once full and warns under its own logger (which also
@@ -266,7 +293,7 @@ for _otel_logger in ("opentelemetry.sdk._shared_internal", "opentelemetry.sdk.tr
 
 def _max_queue_size() -> Optional[str]:
     """``HERMES_LANGFUSE_MAX_QUEUE_SIZE`` as a positive integer string, or ``None`` (SDK default 2048)."""
-    raw = (_env("HERMES_LANGFUSE_MAX_QUEUE_SIZE", "") or "").strip()
+    raw = (_secret("HERMES_LANGFUSE_MAX_QUEUE_SIZE") or _env("HERMES_LANGFUSE_MAX_QUEUE_SIZE", "") or "").strip()
     if not raw:
         return None
     try:
@@ -558,18 +585,9 @@ def _build_client() -> Optional[Langfuse]:
     # Export request timeout. The SDK default (5 s, or LANGFUSE_TIMEOUT) is also how long process exit
     # waits on an in-flight export while Langfuse is unreachable, because OpenTelemetry's own exit hook
     # joins that request. Default 2 s (ample for a self-hosted endpoint); raise it for a distant one.
-    export_timeout = _secret("HERMES_LANGFUSE_TIMEOUT")
-    if export_timeout:
-        try:
-            if int(export_timeout) < 1:
-                raise ValueError
-            kwargs["timeout"] = int(export_timeout)
-        except ValueError:
-            logger.warning("Invalid HERMES_LANGFUSE_TIMEOUT=%r; use a whole number of seconds >= 1. Using %d.",
-                           export_timeout, _DEFAULT_EXPORT_TIMEOUT)
-            kwargs["timeout"] = _DEFAULT_EXPORT_TIMEOUT
-    elif not os.environ.get("LANGFUSE_TIMEOUT"):
-        kwargs["timeout"] = _DEFAULT_EXPORT_TIMEOUT
+    # Read through the profile scope, like the keys: a multiplexed profile may set either name in its
+    # own .env, which the SDK's own os.environ lookup would never see.
+    kwargs["timeout"] = _resolve_export_timeout(_secret("HERMES_LANGFUSE_TIMEOUT") or _secret("LANGFUSE_TIMEOUT"))
     sample_rate = _secret("HERMES_LANGFUSE_SAMPLE_RATE")
     if sample_rate:
         try:
@@ -1156,17 +1174,28 @@ def _finalize_all_traces() -> None:
     # the clients that settled during the run — the launch profile's slot plus one per home.
     # The process is exiting: shut each client down (which flushes) within the exit bound, so the
     # SDK's own atexit shutdown finds nothing left to wait for.
-    for client in (_LANGFUSE_CLIENT, *_LANGFUSE_CLIENT_BY_HOME.values()):
-        if client is not None and client is not _INIT_FAILED:
-            _close_client(client)
+    _close_clients([c for c in (_LANGFUSE_CLIENT, *_LANGFUSE_CLIENT_BY_HOME.values())
+                    if c is not None and c is not _INIT_FAILED])
 
 
 def _close_client(client: Any) -> None:
-    """Shut one SDK client down (flush + stop) within the exit bound, once per process."""
-    with _STATE_LOCK:
-        if client in _SHUT_DOWN_CLIENTS:
-            return
-        _SHUT_DOWN_CLIENTS.add(client)
+    _close_clients([client])
+
+
+def _close_clients(clients: list[Any]) -> None:
+    """Shut SDK clients down (flush + stop) in parallel within ONE exit bound, each once per process."""
+    jobs = []
+    for client in clients:
+        with _STATE_LOCK:
+            if client in _SHUT_DOWN_CLIENTS:
+                continue
+            _SHUT_DOWN_CLIENTS.add(client)
+        jobs.append(("langfuse shutdown", _flush_then_shutdown(client)))
+    if jobs:
+        _bounded_all(jobs)
+
+
+def _flush_then_shutdown(client: Any) -> Callable[[], None]:
     flush = getattr(client, "flush", None)
     shutdown = getattr(client, "shutdown", None)
 
@@ -1178,7 +1207,7 @@ def _close_client(client: Any) -> None:
         if callable(shutdown):
             shutdown()
 
-    _bounded("langfuse shutdown", flush_then_shutdown)
+    return flush_then_shutdown
 
 
 def _flush(client: Any) -> None:
